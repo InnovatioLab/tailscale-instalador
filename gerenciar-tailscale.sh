@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# ==============================================================================
-#   Script de Gerenciamento do Tailscale para Subnet Router
-#   Autor: Gemini (ajustado)
-# ==============================================================================
-
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
@@ -20,22 +15,22 @@ show_menu() {
     echo -e "${GREEN}1.${NC} Instalar o Tailscale (ou verificar instalação)"
     echo -e "${GREEN}2.${NC} Configurar esta máquina como Subnet Router"
     echo -e "${GREEN}3.${NC} Testar a configuração do Subnet Router"
-    echo ""
-    echo -e "${RED}4.${NC} Sair"
+    echo -e "${RED}4.${NC} Remover o Tailscale"
+    echo -e "${RED}5.${NC} Sair"
     echo ""
     echo -e "${BLUE}=====================================================${NC}"
 }
 
 press_enter() {
     echo ""
-    read -p "Pressione [Enter] para continuar..."
+    read -r -p "Pressione [Enter] para continuar..."
 }
 
 install_tailscale() {
     clear
     echo -e "${YELLOW}---> Verificando se o Tailscale já está instalado...${NC}"
 
-    if command -v tailscale &> /dev/null; then
+    if command -v tailscale >/dev/null 2>&1; then
         echo -e "${GREEN}Tailscale já está instalado!${NC}"
         tailscale --version | head -n 1
         press_enter
@@ -44,8 +39,8 @@ install_tailscale() {
 
     echo -e "${YELLOW}Tailscale não encontrado. Instalando...${NC}"
 
-    if ! command -v curl &> /dev/null; then
-        apt-get update && apt-get install curl -y
+    if ! command -v curl >/dev/null 2>&1; then
+        apt-get update && apt-get install -y curl
     fi
 
     curl -fsSL https://tailscale.com/install.sh | sh
@@ -60,7 +55,7 @@ install_tailscale() {
 configure_subnet_router() {
     clear
 
-    if ! command -v tailscale &> /dev/null; then
+    if ! command -v tailscale >/dev/null 2>&1; then
         echo -e "${RED}ERRO: Instale o Tailscale primeiro (opção 1).${NC}"
         press_enter
         return
@@ -83,16 +78,14 @@ configure_subnet_router() {
 
     echo -e "Interface: ${GREEN}$DEFAULT_IFACE${NC}"
 
-    # Tenta pegar a rede direto (método principal)
     LOCAL_NET=$(ip route | grep "$DEFAULT_IFACE" | grep -v default | awk '{print $1}' | head -n 1)
 
-    # Fallback usando ipcalc se necessário
     if [[ ! "$LOCAL_NET" =~ "/" ]]; then
         echo -e "${YELLOW}Fallback: usando ipcalc...${NC}"
 
-        if ! command -v ipcalc &> /dev/null; then
+        if ! command -v ipcalc >/dev/null 2>&1; then
             echo "Instalando ipcalc..."
-            apt-get update && apt-get install ipcalc -y
+            apt-get update && apt-get install -y ipcalc
         fi
 
         IP_CIDR=$(ip -4 addr show dev "$DEFAULT_IFACE" | grep 'inet ' | awk '{print $2}' | head -n 1)
@@ -124,13 +117,13 @@ test_subnet_router() {
     clear
     echo -e "${YELLOW}---> Teste do Subnet Router${NC}"
 
-    if ! command -v tailscale &> /dev/null; then
+    if ! command -v tailscale >/dev/null 2>&1; then
         echo -e "${RED}Instale o Tailscale primeiro.${NC}"
         press_enter
         return
     fi
 
-    TS_IP=$(tailscale ip -4)
+    TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
     DEFAULT_IFACE=$(ip route | grep '^default' | awk '{print $5}' | head -n 1)
     LOCAL_IP=$(ip -4 addr show dev "$DEFAULT_IFACE" | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 
@@ -144,20 +137,62 @@ test_subnet_router() {
     press_enter
 }
 
-if [ "$EUID" -ne 0 ]; then 
+remove_tailscale() {
+    clear
+    echo -e "${YELLOW}---> Removendo o Tailscale...${NC}"
+
+    if ! command -v tailscale >/dev/null 2>&1; then
+        echo -e "${RED}Tailscale não está instalado.${NC}"
+        press_enter
+        return
+    fi
+
+    read -r -p "Tem certeza que deseja remover o Tailscale? [s/N]: " CONFIRM
+    case "$CONFIRM" in
+        s|S|sim|SIM) ;;
+        *)
+            echo -e "${YELLOW}Remoção cancelada.${NC}"
+            press_enter
+            return
+            ;;
+    esac
+
+    echo -e "${YELLOW}Fazendo logout do Tailscale...${NC}"
+    tailscale logout 2>/dev/null || true
+
+    echo -e "${YELLOW}Parando e desabilitando o serviço...${NC}"
+    systemctl stop tailscaled 2>/dev/null || true
+    systemctl disable tailscaled 2>/dev/null || true
+
+    echo -e "${YELLOW}Removendo o pacote do Tailscale...${NC}"
+    apt-get remove --purge -y tailscale
+
+    echo -e "${YELLOW}Removendo dependências não utilizadas...${NC}"
+    apt-get autoremove -y
+
+    echo -e "${YELLOW}Removendo configuração de IP forwarding criada pelo script...${NC}"
+    rm -f /etc/sysctl.d/99-tailscale.conf
+    sysctl --system >/dev/null 2>&1
+
+    echo -e "${GREEN}Tailscale removido com sucesso!${NC}"
+    press_enter
+}
+
+if [ "$(id -u)" -ne 0 ]; then
     echo -e "${RED}Execute como root (sudo).${NC}"
     exit 1
 fi
 
 while true; do
     show_menu
-    read -p "Escolha [1-4]: " CHOICE
+    read -r -p "Escolha [1-5]: " CHOICE
 
-    case $CHOICE in
+    case "$CHOICE" in
         1) install_tailscale ;;
         2) configure_subnet_router ;;
         3) test_subnet_router ;;
-        4) break ;;
-        *) echo -e "${RED}Opção inválida${NC}" && sleep 1 ;;
+        4) remove_tailscale ;;
+        5) exit 0 ;;
+        *) echo -e "${RED}Opção inválida${NC}"; sleep 1 ;;
     esac
 done
